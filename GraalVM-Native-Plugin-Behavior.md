@@ -13,6 +13,106 @@ For a project that must produce both of these deliverables:
 
 conditionally applying the plugin provides a clear switch between the two build modes.
 
+## Recommendation for a dual JVM/native pipeline
+
+For a project that must publish both container variants, prefer conditional application of the GraalVM plugin over permanently applying it and manually selecting either `paketo-buildpacks/java` or `paketo-buildpacks/java-native-image`.
+
+The permanently applied approach combines two separate control mechanisms:
+
+```text
+GraalVM plugin state    -> controls Spring Boot AOT/native preparation
+Explicit buildpack list -> controls the Paketo build pipeline
+```
+
+When the GraalVM plugin is applied, Spring Boot interprets that as native-image intent. It applies Spring AOT support, registers native compilation and testing tasks, adds native reachability metadata and a native-processing marker to `bootJar`, and configures `bootBuildImage` to produce a native image.
+
+An explicit `buildpacks.add(...)` configuration then overrides the builder's normal detection order. This is more than expressing a preference: once one or more buildpacks are specified, Cloud Native Buildpacks applies only that explicitly supplied list instead of the builder's default order.
+
+Selecting `paketo-buildpacks/java` or `paketo-buildpacks/java-native-image` explicitly can be made to work. Both are composite buildpacks that bring together the component buildpacks required for their respective Java pipelines. However, doing so makes the application build responsible for:
+
+- Selecting the correct composite buildpack for every mode.
+- Keeping Spring Boot's AOT/native state consistent with the selected buildpack.
+- Maintaining the explicit selection across Spring Boot, builder, and Paketo upgrades.
+- Ensuring the JVM path does not accidentally retain unintended native settings.
+- Verifying that the expected supporting buildpacks, launch layers, and metadata remain present.
+- Diagnosing conflicts between Spring Boot's native intent and a manually forced JVM buildpack path.
+
+This is lower-level configuration that the Spring Boot and Paketo integration can otherwise manage through their supported conventions. It also creates two sources of truth for the intended artifact: the applied Gradle plugins and the manually selected buildpack.
+
+The recommended configuration has one source of truth: whether the GraalVM plugin is applied.
+
+```kotlin
+plugins {
+    id("org.graalvm.buildtools.native") version "1.1.1" apply false
+}
+
+val nativeImageRequested =
+    providers.gradleProperty("nativeImage").isPresent
+
+if (nativeImageRequested) {
+    apply(plugin = "org.graalvm.buildtools.native")
+}
+
+tasks.named<BootBuildImage>("bootBuildImage") {
+    builder.set("paketobuildpacks/builder-noble-java-tiny:0.0.160")
+
+    imageName.set(
+        if (nativeImageRequested) {
+            "example:${project.version}-native"
+        } else {
+            "example:${project.version}-jvm"
+        }
+    )
+
+    environment.put("BP_JVM_VERSION", "25")
+
+    if (nativeImageRequested) {
+        environment.put(
+            "BP_NATIVE_IMAGE_BUILD_ARGUMENTS",
+            "-march=compatibility",
+        )
+    }
+}
+```
+
+There is intentionally no `buildpacks.add(...)` call. The pinned Noble Java Tiny builder already contains compatible Java and Java Native Image composite buildpacks and their component buildpacks. Leaving the buildpack list unset allows the builder and Spring Boot integration to select the appropriate supported path.
+
+The resulting modes remain internally consistent:
+
+```text
+Plugin not applied
+    -> ordinary executable Spring Boot JAR
+    -> Paketo Java/JRE buildpack path
+    -> container containing the JAR and a JRE
+
+Plugin applied
+    -> Spring AOT processing and native metadata
+    -> Paketo Java Native Image buildpack path
+    -> container containing a native executable and no JRE
+```
+
+Producing both variants requires two Gradle invocations because plugin application is a build-configuration decision:
+
+```bash
+# JVM container
+./gradlew bootBuildImage
+
+# Native container
+./gradlew bootBuildImage -PnativeImage
+```
+
+That separation is useful rather than problematic. It makes the intended artifact explicit in local commands and CI logs, and each Gradle invocation has one internally consistent plugin and buildpack configuration.
+
+In summary, both approaches are technically possible, but conditional plugin application is preferable because it:
+
+- Keeps Spring Boot's application preparation aligned with the intended artifact.
+- Allows the Paketo builder to use its supported detection order.
+- Avoids manually managing composite buildpack selection.
+- Keeps the JVM path conventional.
+- Makes each command's output unambiguous.
+- Reduces coupling to Spring Boot and Paketo implementation details.
+- Is easier to understand, verify, and maintain over time.
+
 ## Declaring the plugin is different from applying it
 
 The example declares the plugin and its version without applying it immediately:
@@ -164,6 +264,8 @@ produce a native container rather than the intended executable-JAR-plus-JRE cont
 
 It is possible to design separate custom tasks or buildpack invocations while keeping the plugin permanently applied. That approach requires additional configuration to ensure that one image packages the ordinary JVM artifact and the other packages the AOT/native artifact. It also makes the distinction less obvious to developers reading or invoking the build.
 
+One implementation of that alternative is to keep the plugin applied and conditionally add either the Paketo Java or Java Native Image composite buildpack to `bootBuildImage`. This deliberately overrides the builder's default buildpack order. It should therefore be treated as an explicit ownership decision rather than as a neutral equivalent of the convention-based configuration. If that design is selected, both output modes should be tested after every Spring Boot, Native Build Tools, builder, or Paketo upgrade, and the generated image metadata, process type, JRE presence, and native executable presence should be verified rather than inferred from the image tag.
+
 ## Why conditional application is appropriate here
 
 This repository has an explicit dual-artifact requirement. The same source revision must produce:
@@ -213,5 +315,6 @@ The recommendation is therefore to keep the plugin declared with `apply false` a
 
 - [Spring Boot Gradle plugin: Ahead-of-Time Processing](https://docs.spring.io/spring-boot/gradle-plugin/aot.html)
 - [Spring Boot Gradle plugin: Reacting to the GraalVM Native Image plugin](https://docs.spring.io/spring-boot/gradle-plugin/reacting.html)
+- [Spring Boot Gradle plugin: Packaging OCI images and overriding buildpacks](https://docs.spring.io/spring-boot/gradle-plugin/packaging-oci-image.html)
 - [Spring Boot: Developing a GraalVM native application](https://docs.spring.io/spring-boot/how-to/native-image/developing-your-first-application.html)
 - [GraalVM Native Build Tools Gradle plugin](https://graalvm.github.io/native-build-tools/latest/gradle-plugin)

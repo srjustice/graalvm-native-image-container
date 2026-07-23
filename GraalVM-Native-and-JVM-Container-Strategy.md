@@ -26,6 +26,8 @@ Paketo Noble Java Tiny is the best default native-image packaging option for thi
 
 The repository's [working Spring Boot example](./README.md) implements this recommendation with Kotlin, Gradle, and two explicit image-build commands.
 
+The companion [GraalVM Native Build Tools plugin behavior guide](./GraalVM-Native-Plugin-Behavior.md) explains why the dual-image build conditionally applies the Gradle plugin instead of permanently applying it and manually overriding Paketo's buildpack selection.
+
 ## 1. Goals and decision criteria
 
 The two Spring Boot microservices are currently delivered as executable JARs in Paketo-generated OCI images containing a JRE. The objective is to add GraalVM Native Image builds while preserving a low-risk JVM delivery path.
